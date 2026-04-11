@@ -63,7 +63,7 @@ class AppearanceDialog(QDialog):
     def __init__(self, settings, parent=None):
         super().__init__(parent)
         self.settings = settings
-        self.setWindowTitle("Appearance & Shortcuts")
+        self.setWindowTitle("Settings & Shortcuts")
         self.setMinimumWidth(440)
         self._build_ui()
         self._load_values()
@@ -75,7 +75,7 @@ class AppearanceDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # Appearance group
-        app_grp = QGroupBox("Appearance")
+        app_grp = QGroupBox("Settings")
         form = QFormLayout(app_grp)
 
         self.font_combo = QComboBox()
@@ -85,7 +85,7 @@ class AppearanceDialog(QDialog):
         form.addRow("Font family:", self.font_combo)
 
         self.font_size_spin = QSpinBox()
-        self.font_size_spin.setRange(8, 48)
+        self.font_size_spin.setRange(8, 72)
         self.font_size_spin.setSuffix(" pt")
         form.addRow("Font size:", self.font_size_spin)
 
@@ -125,8 +125,20 @@ class AppearanceDialog(QDialog):
         self.md_width_edit.setMaximumWidth(130)
         form.addRow("Text width (Markdown view):", self.md_width_edit)
 
+        self.word_wrap_chk = QCheckBox("Word wrap (text editor)")
+        form.addRow("", self.word_wrap_chk)
+
         self.line_numbers_chk = QCheckBox("Show line numbers (text editor)")
         form.addRow("", self.line_numbers_chk)
+
+        row_ln = QHBoxLayout()
+        self.ln_bg_auto_chk  = QCheckBox("Auto")
+        self.ln_bg_auto_chk.setToolTip("Derive background from guide color × 12% on editor background")
+        self.ln_bg_color_btn = ColorButton("#e8e8e8")
+        row_ln.addWidget(self.ln_bg_auto_chk)
+        row_ln.addWidget(self.ln_bg_color_btn)
+        row_ln.addStretch()
+        form.addRow("Line number background:", row_ln)
 
         layout.addWidget(app_grp)
 
@@ -200,7 +212,16 @@ class AppearanceDialog(QDialog):
         self.line_spacing_edit.setText(str(s.get("line_spacing", "1.65")))
         self.para_spacing_edit.setText(str(s.get("para_spacing", "0.6em")))
         self.md_width_edit.setText(str(s.get("md_max_width", "67%")))
+        self.word_wrap_chk.setChecked(bool(s.get("word_wrap", True)))
         self.line_numbers_chk.setChecked(bool(s.get("show_line_numbers", False)))
+        ln_bg = s.get("ln_bg_color", "")
+        if ln_bg:
+            self.ln_bg_auto_chk.setChecked(False)
+            self.ln_bg_color_btn.set_color(ln_bg)
+            self.ln_bg_color_btn.setEnabled(True)
+        else:
+            self.ln_bg_auto_chk.setChecked(True)
+            self.ln_bg_color_btn.setEnabled(False)
         self.toggle_sc.setKeySequence(QKeySequence(s.get("toggle_mode_shortcut", "Ctrl+Shift+Return")))
         self.collapse_sc.setKeySequence(QKeySequence(s["collapse_all_shortcut"]))
         self.expand_sc.setKeySequence(QKeySequence(s["expand_all_shortcut"]))
@@ -209,7 +230,10 @@ class AppearanceDialog(QDialog):
         self.line_spacing_edit.textChanged.connect(self._on_live_change)
         self.para_spacing_edit.textChanged.connect(self._on_live_change)
         self.md_width_edit.textChanged.connect(self._on_live_change)
+        self.word_wrap_chk.toggled.connect(self._on_live_change)
         self.line_numbers_chk.toggled.connect(self._on_live_change)
+        self.ln_bg_auto_chk.toggled.connect(self._on_ln_bg_toggled)
+        self.ln_bg_color_btn.color_changed.connect(self._on_live_change)
         self.font_combo.currentTextChanged.connect(self._on_live_change)
         self.font_size_spin.valueChanged.connect(self._on_live_change)
         self.text_color_btn.color_changed.connect(self._on_live_change)
@@ -219,6 +243,10 @@ class AppearanceDialog(QDialog):
         self.guide_opacity_spin.valueChanged.connect(self._on_live_change)
         self.guide_width_spin.valueChanged.connect(self._on_live_change)
         self.symbol_opacity_spin.valueChanged.connect(self._on_live_change)
+
+    def _on_ln_bg_toggled(self, checked: bool):
+        self.ln_bg_color_btn.setEnabled(not checked)
+        self._on_live_change()
 
     def _on_live_change(self):
         self._write_to_settings()
@@ -234,7 +262,11 @@ class AppearanceDialog(QDialog):
         mw = self.md_width_edit.text().strip()
         if mw:
             self.settings["md_max_width"] = mw
+        self.settings["word_wrap"] = self.word_wrap_chk.isChecked()
         self.settings["show_line_numbers"] = self.line_numbers_chk.isChecked()
+        self.settings["ln_bg_color"] = (
+            "" if self.ln_bg_auto_chk.isChecked() else self.ln_bg_color_btn.color()
+        )
         self.settings["font_family"] = self.font_combo.currentText()
         self.settings["font_size"] = self.font_size_spin.value()
         self.settings["text_color"] = self.text_color_btn.color()

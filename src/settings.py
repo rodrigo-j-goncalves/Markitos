@@ -26,9 +26,12 @@ class Settings:
         "last_file": None,
         "reopen_last_file": False,
         "show_line_numbers": False,
+        "ln_bg_color": "",           # empty = auto-derive (guide_color @ 12% on bg)
+        "open_dir": "",              # last directory used in open/save dialogs
         "line_spacing": "1.65",
         "para_spacing": "0.6em",
         "md_max_width": "95%", # default: 66
+        "word_wrap": True,
     }
 
     def __init__(self):

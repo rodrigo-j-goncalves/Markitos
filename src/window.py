@@ -1,7 +1,7 @@
 import os
 import re
 
-from PyQt6.QtCore import Qt, QUrl, QEvent, QRect, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QUrl, QEvent, QRect, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QKeySequence,
@@ -24,12 +24,16 @@ from PyQt6.QtWidgets import (
     QStackedWidget,
     QPlainTextEdit,
     QVBoxLayout,
+    QHBoxLayout,
     QToolBar,
     QMessageBox,
     QFileDialog,
     QMenu,
     QStatusBar,
+    QLabel,
     QDialog,
+    QPushButton,
+    QSizePolicy,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEnginePage
@@ -39,6 +43,9 @@ from .renderer import render_markdown
 from .dialogs import AppearanceDialog, FindBar
 from .version import __version__, APP_NAME
 
+
+ZOOM_MIN = 6
+ZOOM_MAX = 72
 
 # ---------------------------------------------------------------------------
 # Custom widgets — intercept Ctrl+Scroll before the widget consumes it
@@ -196,11 +203,14 @@ class _IndentGuides(QWidget):
 
 
 class _LineNumberArea(QWidget):
-    """Gutter widget that shows line numbers to the left of the editor."""
+    """Gutter widget — delegates all painting to the editor."""
 
-    def __init__(self, editor: 'QPlainTextEdit'):
+    def __init__(self, editor):
         super().__init__(editor)
         self._editor = editor
+
+    def sizeHint(self):
+        return QSize(self._editor.line_number_area_width(), 0)
 
     def paintEvent(self, event):
         self._editor.line_number_area_paint_event(event)
@@ -208,18 +218,19 @@ class _LineNumberArea(QWidget):
 
 class _Editor(QPlainTextEdit):
     ctrl_scroll = pyqtSignal(int)
+    paste_done  = pyqtSignal()
 
     def __init__(self):
         super().__init__()
         self._show_line_numbers = False
-        self._ln_bg      = QColor(240, 240, 240)
-        self._ln_color   = QColor(128, 128, 128)
-        self._ln_current = QColor(26,  26,  26)
+        self._ln_color = QColor(128, 128, 128)
+        self._ln_bg    = QColor(240, 240, 240)
         self._line_number_area = _LineNumberArea(self)
-        # Always connect; width becomes 0 when feature is off.
         self.blockCountChanged.connect(self._update_ln_width)
         self.updateRequest.connect(self._update_ln_area)
-        self.cursorPositionChanged.connect(self._line_number_area.update)
+        # Intercept drag-and-drop on the viewport so URL drops propagate to
+        # the main window rather than being inserted as text (or crashing).
+        self.viewport().installEventFilter(self)
         # Auto-renumber ordered lists
         self._renumbering = False
         self._renumber_timer = QTimer(self)
@@ -228,32 +239,29 @@ class _Editor(QPlainTextEdit):
         self._renumber_timer.timeout.connect(self._renumber_lists)
         self.document().contentsChanged.connect(self._schedule_renumber)
 
-    # --------------------------------------------------------- public API
+    # --------------------------------------------------------- line numbers
 
     def set_line_numbers(self, show: bool):
         self._show_line_numbers = show
         self._line_number_area.setVisible(show)
         self._update_ln_width()
 
-    def set_line_number_colors(self, fg: QColor, bg: QColor, current_fg: QColor):
-        self._ln_color   = fg
-        self._ln_bg      = bg
-        self._ln_current = current_fg
+    def set_line_number_colors(self, fg: QColor, bg: QColor):
+        self._ln_color = fg
+        self._ln_bg    = bg
         self._line_number_area.update()
-
-    # --------------------------------------------------------- internals
 
     def line_number_area_width(self) -> int:
         if not self._show_line_numbers:
             return 0
         digits = len(str(max(1, self.blockCount())))
-        bold_f = QFont(self.font())
-        bold_f.setBold(True)
-        # 8 px left padding + digits + 10 px right margin (before separator)
-        return 8 + QFontMetrics(bold_f).horizontalAdvance('9' * digits) + 10
+        return 6 + QFontMetrics(self.font()).horizontalAdvance('9' * digits)
 
     def _update_ln_width(self, _=0):
-        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+        w = self.line_number_area_width()
+        self.setViewportMargins(w, 0, 0, 0)
+        cr = self.contentsRect()
+        self._line_number_area.setGeometry(QRect(cr.left(), cr.top(), w, cr.height()))
 
     def _update_ln_area(self, rect, dy):
         if dy:
@@ -275,47 +283,33 @@ class _Editor(QPlainTextEdit):
     def line_number_area_paint_event(self, event):
         painter = QPainter(self._line_number_area)
         painter.fillRect(event.rect(), self._ln_bg)
-
-        # Separator line on the right edge of the gutter
-        sep_x = self._line_number_area.width() - 1
-        sep_color = QColor(self._ln_current)
-        sep_color.setAlphaF(0.15)
-        painter.setPen(QPen(sep_color))
-        painter.drawLine(sep_x, event.rect().top(), sep_x, event.rect().bottom())
-
-        fm      = self.fontMetrics()
-        offset  = self.contentOffset()
-        current = self.textCursor().blockNumber()
-        w       = self._line_number_area.width() - 12  # leave room for separator
+        painter.setPen(self._ln_color)
+        painter.setFont(self.font())
 
         block     = self.firstVisibleBlock()
         block_num = block.blockNumber()
-        top       = int(self.blockBoundingGeometry(block).translated(offset).top())
+        top    = round(self.blockBoundingGeometry(block)
+                           .translated(self.contentOffset()).top())
+        bottom = top + round(self.blockBoundingRect(block).height())
 
         while block.isValid() and top <= event.rect().bottom():
-            h      = int(self.blockBoundingGeometry(block).height())
-            bottom = top + h
-
             if block.isVisible() and bottom >= event.rect().top():
-                if block_num == current:
-                    f = QFont(self.font())
-                    f.setBold(True)
-                    painter.setFont(f)
-                    painter.setPen(QPen(self._ln_current))
-                else:
-                    painter.setFont(self.font())
-                    painter.setPen(QPen(self._ln_color))
                 painter.drawText(
-                    0, top, w, fm.height(),
-                    Qt.AlignmentFlag.AlignRight,
-                    str(block_num + 1),
+                    QRect(0, top,
+                          self._line_number_area.width() - 4,
+                          round(self.blockBoundingRect(block).height())),
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    str(block_num + 1)
                 )
-
             block     = block.next()
             block_num += 1
-            top       = bottom
+            top    = bottom
+            bottom = top + (round(self.blockBoundingRect(block).height())
+                            if block.isValid() else 0)
 
         painter.end()
+
+    # --------------------------------------------------------- events
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -356,7 +350,7 @@ class _Editor(QPlainTextEdit):
             super().keyPressEvent(event)
 
     def insertFromMimeData(self, source):
-        """Paste a URI onto selected text → convert to [text](uri)."""
+        """Paste plain text; if a URL is pasted onto selected text → [text](uri)."""
         text = source.text().strip()
         cursor = self.textCursor()
         if cursor.hasSelection() and re.match(r"^https?://|^ftp://|^file://", text):
@@ -364,7 +358,29 @@ class _Editor(QPlainTextEdit):
             cursor.insertText(f"[{selected}]({text})")
             self.setTextCursor(cursor)
         else:
-            super().insertFromMimeData(source)
+            # Always insert as plain text to prevent pasted rich content from
+            # overriding the editor font/size set by the zoom level.
+            self.insertPlainText(source.text())
+        self.paste_done.emit()
+
+    def eventFilter(self, obj, event):
+        # QPlainTextEdit routes drag events through its viewport widget, so
+        # we intercept them here and forward file-URL drops to the MainWindow.
+        # Returning True stops Qt's default handler (which would insert text);
+        # we accept the drag so the OS shows a valid drop cursor, then hand
+        # the actual drop off to the main window's existing handler.
+        if obj is self.viewport():
+            if event.type() == QEvent.Type.DragEnter and event.mimeData().hasUrls():
+                urls = event.mimeData().urls()
+                if urls and urls[0].toLocalFile().lower().endswith((".md", ".txt")):
+                    event.acceptProposedAction()
+                else:
+                    event.ignore()
+                return True
+            if event.type() == QEvent.Type.Drop and event.mimeData().hasUrls():
+                self.window().dropEvent(event)
+                return True
+        return super().eventFilter(obj, event)
 
     def _between_pair(self) -> bool:
         cursor = self.textCursor()
@@ -612,7 +628,10 @@ class MainWindow(QMainWindow):
 
         self._editor = _Editor()
         self._editor.ctrl_scroll.connect(self._on_ctrl_scroll)
+        self._editor.paste_done.connect(self._apply_editor_style)
         self._editor.textChanged.connect(self._mark_modified)
+        self._editor.textChanged.connect(self._update_status_counts)
+        self._editor.cursorPositionChanged.connect(self._update_status_counts)
         self._guides = _IndentGuides(self._editor)
         self._ws_fader = _WhitespaceFader(self._editor.document())
         self._stack.addWidget(self._editor)
@@ -624,10 +643,24 @@ class MainWindow(QMainWindow):
 
         self._status = QStatusBar()
         self.setStatusBar(self._status)
-        self._status.showMessage("Ready")
+
+        # Left: persistent mode label (replaced temporarily by transient messages).
+        self._lbl_mode = QLabel("Ready")
+        self._lbl_mode.setContentsMargins(4, 0, 8, 0)
+        self._status.addWidget(self._lbl_mode)
+
+        # Right: permanent info labels — always visible regardless of messages.
+        self._lbl_zoom  = QLabel()
+        self._lbl_chars = QLabel()
+        self._lbl_words = QLabel()
+        for lbl in (self._lbl_zoom, self._lbl_chars, self._lbl_words):
+            lbl.setContentsMargins(8, 0, 8, 0)
+            self._status.addPermanentWidget(lbl)
 
         self._stack.setCurrentWidget(self._viewer)
         self._apply_editor_style()
+        self._update_status_zoom()
+        self._update_status_counts()
 
     def _setup_menus(self):
         mb = self.menuBar()
@@ -673,9 +706,15 @@ class MainWindow(QMainWindow):
         self._toggle_act.triggered.connect(self.toggle_mode)
         view_menu.addAction(self._toggle_act)
 
+        self._wrap_act = QAction("&Word Wrap", self)
+        self._wrap_act.setCheckable(True)
+        self._wrap_act.setChecked(bool(self.settings.get("word_wrap", True)))
+        self._wrap_act.triggered.connect(self._toggle_word_wrap)
+        view_menu.addAction(self._wrap_act)
+
         view_menu.addSeparator()
 
-        act = QAction("&Appearance…", self)
+        act = QAction("&Settings…", self)
         act.triggered.connect(self.show_appearance_dialog)
         view_menu.addAction(act)
 
@@ -708,7 +747,18 @@ class MainWindow(QMainWindow):
         _act("⊞ Expand all", "Expand all list items", self.expand_all)
         tb.addSeparator()
 
-        _act("Appearance", "Appearance & shortcuts", self.show_appearance_dialog)
+        self._wrap_tb_act = QAction("Word Wrap", self)
+        self._wrap_tb_act.setCheckable(True)
+        self._wrap_tb_act.setChecked(bool(self.settings.get("word_wrap", True)))
+        self._wrap_tb_act.setToolTip("Toggle word wrap")
+        self._wrap_tb_act.triggered.connect(self._toggle_word_wrap)
+        tb.addAction(self._wrap_tb_act)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(spacer)
+
+        _act("Settings", "Settings & shortcuts", self.show_appearance_dialog)
 
     def _setup_shortcuts(self):
         # Escape: dismiss find bar → switch to text editor → exit
@@ -775,13 +825,15 @@ class MainWindow(QMainWindow):
     def open_file_dialog(self):
         if not self._confirm_discard():
             return
+        start_dir = self.settings.get("open_dir", "") or os.path.expanduser("~")
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Open File",
-            "",
+            start_dir,
             "Markdown / Text (*.md *.txt);;All files (*)",
         )
         if path:
+            self.settings["open_dir"] = os.path.dirname(path)
             self._load_file(path)
 
     def _load_file(self, path: str):
@@ -802,7 +854,7 @@ class MainWindow(QMainWindow):
         self.settings["last_file"] = path
         self._rebuild_recent_menu()
         self._update_title()
-        self._status.showMessage(f"Opened: {os.path.basename(path)}")
+        self._status.showMessage(f"Opened: {os.path.basename(path)}", 3000)
 
         # Always show the rendered view after opening
         if not self.view_mode:
@@ -819,7 +871,11 @@ class MainWindow(QMainWindow):
         self._write_file(self.current_file)
 
     def save_as_file(self):
-        default = self.current_file or "untitled.md"
+        if self.current_file:
+            default = self.current_file
+        else:
+            start_dir = self.settings.get("open_dir", "") or os.path.expanduser("~")
+            default = os.path.join(start_dir, "untitled.md")
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save As",
@@ -833,6 +889,7 @@ class MainWindow(QMainWindow):
             self.current_file = path
             self.settings.add_recent_file(path)
             self.settings["last_file"] = path
+            self.settings["open_dir"] = os.path.dirname(path)
             self._rebuild_recent_menu()
             self._update_title()
 
@@ -842,7 +899,7 @@ class MainWindow(QMainWindow):
                 f.write(self._editor.toPlainText())
             self.modified = False
             self._update_title()
-            self._status.showMessage(f"Saved: {os.path.basename(path)}")
+            self._status.showMessage(f"Saved: {os.path.basename(path)}", 3000)
         except OSError as exc:
             QMessageBox.critical(self, "Error", f"Cannot save file:\n{exc}")
 
@@ -850,18 +907,45 @@ class MainWindow(QMainWindow):
         """Return True if safe to proceed (no unsaved changes, or user confirms)."""
         if not self.modified:
             return True
-        reply = QMessageBox.question(
-            self,
-            "Unsaved changes",
-            "You have unsaved changes.",
-            QMessageBox.StandardButton.Save
-            | QMessageBox.StandardButton.Discard
-            | QMessageBox.StandardButton.Cancel,
-        )
-        if reply == QMessageBox.StandardButton.Save:
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Unsaved changes")
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("You have unsaved changes."))
+
+        btn_row = QHBoxLayout()
+        save_btn    = QPushButton("Save  [S]")
+        discard_btn = QPushButton("Discard  [D]")
+        cancel_btn  = QPushButton("Cancel  [Esc]")
+        btn_row.addWidget(save_btn)
+        btn_row.addWidget(discard_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        result = [None]
+
+        def _save():
+            result[0] = "save"
+            dlg.accept()
+
+        def _discard():
+            result[0] = "discard"
+            dlg.accept()
+
+        save_btn.clicked.connect(_save)
+        discard_btn.clicked.connect(_discard)
+        cancel_btn.clicked.connect(dlg.reject)
+        QShortcut(QKeySequence("S"), dlg).activated.connect(_save)
+        QShortcut(QKeySequence("D"), dlg).activated.connect(_discard)
+
+        dlg.exec()
+
+        if result[0] == "save":
             self.save_file()
             return not self.modified
-        return reply == QMessageBox.StandardButton.Discard
+        if result[0] == "discard":
+            return True
+        return False
 
     # --------------------------------------------------------------- mode toggle
 
@@ -878,7 +962,7 @@ class MainWindow(QMainWindow):
         self._mode_btn.setText("Markdown")
         self._mode_btn.setToolTip("Switch to text editor  (Ctrl+E)")
         self._toggle_act.setText("Switch to &Text editor")
-        self._status.showMessage("Markdown view")
+        self._lbl_mode.setText("Markdown view")
 
     def switch_to_edit_mode(self):
         self.view_mode = False
@@ -888,7 +972,7 @@ class MainWindow(QMainWindow):
         self._toggle_act.setText("Switch to &Markdown view")
         self._apply_editor_style()
         self._editor.setFocus()
-        self._status.showMessage("Text editor")
+        self._lbl_mode.setText("Text editor")
 
     # ---------------------------------------------------------------- rendering
 
@@ -948,28 +1032,62 @@ class MainWindow(QMainWindow):
         pal.setColor(QPalette.ColorRole.Base, bc)
         pal.setColor(QPalette.ColorRole.Text, dim)
         self._editor.setPalette(pal)
+        self._editor.viewport().setPalette(pal)
 
         guide_color = self.settings["guide_color"] or self.settings["text_color"]
         self._guides.set_style(guide_color, self.settings["guide_opacity"], self.settings["guide_width"])
 
         self._ws_fader.set_normal_color(tc)
 
-        # Line-number gutter: visibly distinct background (20 % text / 80 % bg).
-        gutter_bg = QColor(
-            int(tc.red()   * 0.20 + bc.red()   * 0.80),
-            int(tc.green() * 0.20 + bc.green() * 0.80),
-            int(tc.blue()  * 0.20 + bc.blue()  * 0.80),
+        # Line number colors: guide_color × symbol_opacity blended onto bg_color.
+        guide_hex = self.settings["guide_color"] or self.settings["text_color"]
+        gc = QColor(guide_hex)
+        ln_fg = QColor(
+            int(gc.red()   * op + bc.red()   * (1 - op)),
+            int(gc.green() * op + bc.green() * (1 - op)),
+            int(gc.blue()  * op + bc.blue()  * (1 - op)),
         )
-        self._editor.set_line_number_colors(dim, gutter_bg, tc)
+        ln_bg_hex = self.settings.get("ln_bg_color", "")
+        if ln_bg_hex:
+            ln_bg = QColor(ln_bg_hex)
+        else:
+            ln_bg = QColor(
+                int(gc.red()   * 0.12 + bc.red()   * 0.88),
+                int(gc.green() * 0.12 + bc.green() * 0.88),
+                int(gc.blue()  * 0.12 + bc.blue()  * 0.88),
+            )
         self._editor.set_line_numbers(self.settings.get("show_line_numbers", False))
+        self._editor.set_line_number_colors(ln_fg, ln_bg)
+
+        self._apply_word_wrap()
+
+    # -------------------------------------------------------------- status bar
+
+    def _update_status_zoom(self):
+        self._lbl_zoom.setText(f"{self.settings['font_size']} pt")
+
+    def _update_status_counts(self):
+        cursor = self._editor.textCursor()
+        if cursor.hasSelection():
+            text   = cursor.selectedText()
+            suffix = " (sel)"
+        else:
+            text   = self._editor.toPlainText()
+            suffix = ""
+        chars = len(text)
+        words = len(text.split()) if text.strip() else 0
+        self._lbl_chars.setText(f"{chars:,} chars{suffix}")
+        self._lbl_words.setText(f"{words:,} words{suffix}")
 
     # -------------------------------------------------------------- Ctrl+Scroll
 
     def _on_ctrl_scroll(self, delta: int):
-        size = self.settings["font_size"]
-        new_size = max(8, min(48, size + (1 if delta > 0 else -1)))
+        # Clamp on read too — guards against a corrupted settings value.
+        size = max(ZOOM_MIN, min(ZOOM_MAX, int(self.settings["font_size"])))
+        new_size = max(ZOOM_MIN, min(ZOOM_MAX, size + (1 if delta > 0 else -1)))
         if new_size != size:
             self.settings["font_size"] = new_size
+            self._update_status_zoom()
             if self.view_mode:
                 self._render_view()
             else:
@@ -1019,9 +1137,24 @@ class MainWindow(QMainWindow):
             self.settings.restore(saved)
         self._on_appearance_live()
 
+    def _toggle_word_wrap(self, checked: bool):
+        self.settings["word_wrap"] = checked
+        self._apply_word_wrap()
+
+    def _apply_word_wrap(self):
+        on = bool(self.settings.get("word_wrap", True))
+        mode = (QPlainTextEdit.LineWrapMode.WidgetWidth if on
+                else QPlainTextEdit.LineWrapMode.NoWrap)
+        self._editor.setLineWrapMode(mode)
+        if hasattr(self, "_wrap_act"):
+            self._wrap_act.setChecked(on)
+        if hasattr(self, "_wrap_tb_act"):
+            self._wrap_tb_act.setChecked(on)
+
     def _on_appearance_live(self):
         self._viewer.page().setBackgroundColor(QColor(self.settings["bg_color"]))
         self._apply_editor_style()
+        self._update_status_zoom()
         if self.view_mode:
             self._render_view()
 
