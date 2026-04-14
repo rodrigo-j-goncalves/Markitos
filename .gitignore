@@ -1,0 +1,6 @@
+*
+!.gitignore
+!markitos.py
+!README.md
+!src/
+!icon/
