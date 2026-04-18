@@ -218,10 +218,8 @@ ol {{
 ol > li {{
     counter-increment: li;
 }}
-/* Indentation guide lines for nested levels */
 li > ul, li > ol,
 details > ul, details > ol {{
-    border-left: 1px solid rgba(128,128,128,0.25);
     margin-left: .3em;
     padding-left: 1.1em;
 }}
@@ -378,6 +376,20 @@ function expandAll() {
         items[idx].classList.add('nav-focus');
         items[idx].scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
+
+    // Called from Python after mode switch to pre-select the correct item so
+    // that the first Down/Up keypress continues from the right place.
+    window.__mdNavInit = function(headingText) {
+        var items = visibleNavItems();
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].textContent.trim() === headingText) {
+                clearFocus(items);
+                navIndex = i;
+                applyFocus(items, i);
+                return;
+            }
+        }
+    };
 
     document.addEventListener('keydown', function(e) {
         var items = visibleNavItems();

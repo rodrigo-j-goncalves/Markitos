@@ -121,6 +121,8 @@ Uses [KaTeX](https://katex.org/) loaded from CDN. Works whenever the machine is 
 
 Examples:
 
+This MD code:
+
 ```
 Inline: The viscosity ranges from $0.7 \text{ to } 2.0 \text{ mPa}\cdot\text{s}$.
 
@@ -129,6 +131,17 @@ $$
 E = mc^2
 $$
 ```
+is redered as:
+
+Inline: The viscosity ranges from $0.7 \text{to} 2.0 \text{mPa}\cdot\text{s}$.
+
+Display:
+
+$$
+E = mc^2
+$$
+
+
 
 Math expressions are protected from Markdown parsing before rendering, so underscores and asterisks inside `$...$` are treated as LaTeX, not Markdown emphasis.
 

@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEnginePage
+from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 
 from .settings import Settings
 from .renderer import render_markdown
@@ -686,10 +686,14 @@ class MainWindow(QMainWindow):
         vbox.addWidget(self._stack)
 
         self._viewer = _WebView()
+        self._viewer.settings().setAttribute(
+            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
+        )
         self._viewer.ctrl_scroll.connect(self._on_ctrl_scroll)
         self._viewer.page().setBackgroundColor(QColor(self.settings["bg_color"]))
         self._viewer.loadFinished.connect(self._on_view_loaded)
         self._pending_scroll = None
+        self._pending_scroll_heading = None
         self._view_scroll_ratio = 0.0   # kept in sync by scrollPositionChanged
         self._viewer.page().scrollPositionChanged.connect(self._on_viewer_scroll)
         self._stack.addWidget(self._viewer)
@@ -1064,21 +1068,52 @@ class MainWindow(QMainWindow):
         self._apply_editor_style()
         self._lbl_mode.setText("Text editor")
 
-        # Restore editor position using the scroll ratio we track synchronously.
-        # If the page hasn't finished loading/scrolling yet (_pending_scroll still
-        # set), use the intended ratio and discard the pending scroll so the now-
-        # hidden viewer is not scrolled after we leave.
         if self._pending_scroll is not None:
+            # Page not yet loaded — fall back to the approximate ratio.
             ratio = self._pending_scroll
             self._pending_scroll = None
+            self._restore_editor_scroll(ratio)
         else:
-            ratio = self._view_scroll_ratio
-        self._restore_editor_scroll(ratio)
+            # Ask the MD view which heading is at/above the viewport centre,
+            # then jump the editor cursor to that heading.
+            self._viewer.page().runJavaScript(
+                "(function(){"
+                "var els=document.querySelectorAll('summary.header-toggle,h1');"
+                "var best=null,mid=window.scrollY+window.innerHeight/2;"
+                "for(var i=0;i<els.length;i++){"
+                "  if(els[i].getBoundingClientRect().top+window.scrollY<=mid)"
+                "    best=els[i].textContent.trim();"
+                "  else break;"
+                "}"
+                "return best;"
+                "})()",
+                self._restore_editor_to_heading,
+            )
 
         # Give focus directly if the window is already active (normal case).
         # If not active (e.g. after drag-and-drop), changeEvent(WindowActivate)
         # will give focus once the user activates the window.
         self._editor.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _restore_editor_to_heading(self, heading_text):
+        """Position the editor cursor at the source heading matching heading_text.
+        Falls back to ratio-based restore when no heading is matched.
+        """
+        if heading_text:
+            doc = self._editor.document()
+            block = doc.begin()
+            while block.isValid():
+                m = re.match(r'^#{1,6}\s+(.*)', block.text())
+                # Normalise the source heading the same way the browser renders it
+                # so "## **Bold** Title" matches the textContent "Bold Title".
+                if m and self._heading_display_text(m.group(1)) == heading_text:
+                    cursor = QTextCursor(block)
+                    self._editor.setTextCursor(cursor)
+                    QTimer.singleShot(0, self._editor.ensureCursorVisible)
+                    return
+                block = block.next()
+        # No heading matched — fall back to scroll-ratio restore.
+        self._restore_editor_scroll(self._view_scroll_ratio)
 
     def _on_viewer_scroll(self, pos):
         """Keep _view_scroll_ratio in sync whenever the viewer scrolls."""
@@ -1111,11 +1146,41 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- rendering
 
+    # ---------------------------------------------------------------- heading helpers
+
+    @staticmethod
+    def _heading_display_text(source_heading: str) -> str:
+        """Strip inline markdown from a heading so it matches the rendered textContent."""
+        t = source_heading
+        t = re.sub(r'\*\*(.+?)\*\*', r'\1', t)   # bold **...**
+        t = re.sub(r'__(.+?)__',     r'\1', t)   # bold __...__
+        t = re.sub(r'\*(.+?)\*',     r'\1', t)   # italic *...*
+        t = re.sub(r'_(.+?)_',       r'\1', t)   # italic _..._
+        t = re.sub(r'`(.+?)`',       r'\1', t)   # inline code
+        t = re.sub(r'\[(.+?)\]\([^)]*\)', r'\1', t)  # link [text](url)
+        return t.strip()
+
+    def _nearest_heading_above(self, block_num: int):
+        """Return (display_text, block_number) of the nearest heading at or before
+        block_num, or (None, None) if none exists."""
+        doc = self._editor.document()
+        for i in range(block_num, -1, -1):
+            m = re.match(r'^#{1,6}\s+(.*)', doc.findBlockByNumber(i).text())
+            if m:
+                return self._heading_display_text(m.group(1)), i
+        return None, None
+
+    # ---------------------------------------------------------------- rendering
+
     def _render_view(self, sync_scroll=False):
         if sync_scroll:
-            cur = self._editor.textCursor()
+            # Use the cursor block: the user places their cursor at the paragraph
+            # they want to remain visible when switching to MD view.
+            block_num = self._editor.textCursor().blockNumber()
+            heading, _ = self._nearest_heading_above(block_num)
             total = max(self._editor.document().blockCount() - 1, 1)
-            self._pending_scroll = cur.blockNumber() / total
+            self._pending_scroll_heading = heading
+            self._pending_scroll = block_num / total
         html = render_markdown(self._editor.toPlainText(), self.settings)
         if self.current_file:
             base_url = QUrl.fromLocalFile(os.path.dirname(self.current_file) + os.sep)
@@ -1124,16 +1189,34 @@ class MainWindow(QMainWindow):
         self._viewer.setHtml(html, base_url)
 
     def _on_view_loaded(self, ok):
-        if ok and self._pending_scroll is not None:
-            ratio = self._pending_scroll
-            # Pre-seed the synchronous tracker so switch_to_edit_mode has a
-            # valid ratio even in the brief window before scrollPositionChanged fires.
-            self._view_scroll_ratio = ratio
-            self._viewer.page().runJavaScript(
-                f"var t = document.body.scrollHeight * {ratio:.4f};"
-                f"window.scrollTo(0, Math.max(0, t - window.innerHeight / 2));"
-            )
+        if not (ok and self._pending_scroll is not None):
+            self._pending_scroll = None
+            return
+
+        # Pre-seed ratio so switch_to_edit_mode has a value before
+        # scrollPositionChanged fires.
+        self._view_scroll_ratio = self._pending_scroll
         self._pending_scroll = None
+
+        heading = getattr(self, '_pending_scroll_heading', None)
+        self._pending_scroll_heading = None
+
+        if heading:
+            # Use the page's own nav system: sets navIndex to the matching
+            # item, applies the nav-focus highlight, and scrollIntoView.
+            # This means the first Down/Up keypress continues from that item.
+            safe = heading.replace('\\', '\\\\').replace('"', '\\"')
+            self._viewer.page().runJavaScript(
+                f'window.__mdNavInit("{safe}")'
+            )
+        else:
+            ratio = self._view_scroll_ratio
+            self._viewer.page().runJavaScript(
+                f'(function(){{'
+                f'  var t=document.body.scrollHeight*{ratio:.4f};'
+                f'  window.scrollTo(0,Math.max(0,t-window.innerHeight/2));'
+                f'}})()'
+            )
 
     def collapse_all(self):
         if self.view_mode:
@@ -1204,6 +1287,7 @@ class MainWindow(QMainWindow):
 
         self._apply_word_wrap()
         self.modified = _was_modified
+        self._update_title()   # re-sync title in case textChanged fired during styling
 
     # -------------------------------------------------------------- status bar
 
