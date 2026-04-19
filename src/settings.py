@@ -56,14 +56,26 @@ class Settings:
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(self._data, f, indent=2)
 
+    # Keys that change during normal use (not via the settings dialog)
+    # and must be written on close without overwriting appearance settings
+    # saved by other windows.
+    _SESSION_KEYS = (
+        "window_x", "window_y", "window_width", "window_height",
+        "recent_files", "last_file", "open_dir", "word_wrap",
+    )
+
     def save_geometry(self):
-        """Reload settings from disk and update only the window geometry keys."""
+        """Reload settings from disk and update only session-state keys.
+
+        This preserves appearance settings saved by other windows while
+        still persisting geometry, recent files, and other operational state.
+        """
         try:
             with open(self.config_path, encoding="utf-8") as f:
                 data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             data = {}
-        for key in ("window_x", "window_y", "window_width", "window_height"):
+        for key in self._SESSION_KEYS:
             data[key] = self._data[key]
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)

@@ -39,6 +39,8 @@ from PyQt6.QtWidgets import (
     QDialog,
     QPushButton,
     QSizePolicy,
+    QButtonGroup,
+    QFrame,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
@@ -429,7 +431,7 @@ class _Editor(QPlainTextEdit):
         # we accept the drag so the OS shows a valid drop cursor, then hand
         # the actual drop off to the main window's existing handler.
         if obj is self.viewport():
-            if event.type() == QEvent.Type.DragEnter and event.mimeData().hasUrls():
+            if event.type() in (QEvent.Type.DragEnter, QEvent.Type.DragMove) and event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
                 if urls and urls[0].toLocalFile().lower().endswith((".md", ".txt")):
                     event.acceptProposedAction()
@@ -768,6 +770,11 @@ class MainWindow(QMainWindow):
         # File
         file_menu = mb.addMenu("&File")
 
+        act = QAction("&New", self)
+        act.setShortcut(QKeySequence.StandardKey.New)
+        act.triggered.connect(self.new_file)
+        file_menu.addAction(act)
+
         act = QAction("&Open…", self)
         act.setShortcut(QKeySequence.StandardKey.Open)
         act.triggered.connect(self.open_file_dialog)
@@ -836,11 +843,9 @@ class MainWindow(QMainWindow):
             tb.addAction(a)
             return a
 
+        _act("New", "New file  (Ctrl+N)", self.new_file)
         _act("Open", "Open file  (Ctrl+O)", self.open_file_dialog)
         _act("Save", "Save file  (Ctrl+S)", self.save_file)
-        tb.addSeparator()
-
-        self._mode_btn = _act("Text", "Toggle Text / Markdown  (Ctrl+E)", self.toggle_mode)
         tb.addSeparator()
 
         _act("⊟ Collapse all", "Collapse all list items", self.collapse_all)
@@ -854,9 +859,51 @@ class MainWindow(QMainWindow):
         self._wrap_tb_act.triggered.connect(self._toggle_word_wrap)
         tb.addAction(self._wrap_tb_act)
 
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        tb.addWidget(spacer)
+        left_spacer = QWidget()
+        left_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(left_spacer)
+
+        # Segmented control: [Text | MD]
+        _seg_style_left = (
+            "QPushButton { border: 1px solid palette(mid);"
+            " border-top-left-radius: 4px; border-bottom-left-radius: 4px;"
+            " border-right: none; padding: 2px 14px; background: palette(button); }"
+            "QPushButton:checked { background: palette(highlight); color: palette(highlighted-text); }"
+            "QPushButton:hover:!checked { background: palette(light); }"
+        )
+        _seg_style_right = (
+            "QPushButton { border: 1px solid palette(mid);"
+            " border-top-right-radius: 4px; border-bottom-right-radius: 4px;"
+            " padding: 2px 14px; background: palette(button); }"
+            "QPushButton:checked { background: palette(highlight); color: palette(highlighted-text); }"
+            "QPushButton:hover:!checked { background: palette(light); }"
+        )
+        seg = QFrame()
+        seg_layout = QHBoxLayout(seg)
+        seg_layout.setContentsMargins(0, 0, 0, 0)
+        seg_layout.setSpacing(0)
+        self._text_btn = QPushButton("Text")
+        self._text_btn.setCheckable(True)
+        self._text_btn.setChecked(True)
+        self._text_btn.setToolTip("Switch to text editor")
+        self._text_btn.setStyleSheet(_seg_style_left)
+        self._text_btn.clicked.connect(self.switch_to_edit_mode)
+        self._md_btn = QPushButton("MD")
+        self._md_btn.setCheckable(True)
+        self._md_btn.setToolTip("Switch to Markdown view")
+        self._md_btn.setStyleSheet(_seg_style_right)
+        self._md_btn.clicked.connect(self.switch_to_view_mode)
+        seg_group = QButtonGroup(seg)
+        seg_group.setExclusive(True)
+        seg_group.addButton(self._text_btn)
+        seg_group.addButton(self._md_btn)
+        seg_layout.addWidget(self._text_btn)
+        seg_layout.addWidget(self._md_btn)
+        tb.addWidget(seg)
+
+        right_spacer = QWidget()
+        right_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(right_spacer)
 
         _act("Settings", "Settings & shortcuts", self.show_appearance_dialog)
 
@@ -927,6 +974,17 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- file ops
 
+    def new_file(self):
+        if not self._confirm_discard():
+            return
+        self._editor.textChanged.disconnect(self._mark_modified)
+        self._editor.setPlainText("")
+        self._editor.textChanged.connect(self._mark_modified)
+        self.current_file = None
+        self.modified = False
+        self._update_title()
+        self.switch_to_edit_mode()
+
     def open_file_dialog(self):
         if not self._confirm_discard():
             return
@@ -965,7 +1023,7 @@ class MainWindow(QMainWindow):
         if not self.view_mode:
             self.view_mode = True
             self._stack.setCurrentWidget(self._viewer)
-            self._mode_btn.setText("Text")
+            self._md_btn.setChecked(True)
             self._toggle_act.setText("Switch to &Text editor")
         self._lbl_mode.setText("Markdown view")
         self._render_view()
@@ -1081,16 +1139,14 @@ class MainWindow(QMainWindow):
         self.view_mode = True
         self._render_view(sync_scroll=True)
         self._stack.setCurrentWidget(self._viewer)
-        self._mode_btn.setText("Markdown")
-        self._mode_btn.setToolTip("Switch to text editor  (Ctrl+E)")
+        self._md_btn.setChecked(True)
         self._toggle_act.setText("Switch to &Text editor")
         self._lbl_mode.setText("Markdown view")
 
     def switch_to_edit_mode(self):
         self.view_mode = False
         self._stack.setCurrentWidget(self._editor)
-        self._mode_btn.setText("Text")
-        self._mode_btn.setToolTip("Switch to Markdown view  (Ctrl+E)")
+        self._text_btn.setChecked(True)
         self._toggle_act.setText("Switch to &Markdown view")
         self._apply_editor_style()
         self._lbl_mode.setText("Text editor")
@@ -1433,13 +1489,18 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- drag-drop
 
+    def _accept_drag(self, event):
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        if urls and urls[0].toLocalFile().lower().endswith((".md", ".txt")):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            path = event.mimeData().urls()[0].toLocalFile()
-            if path.lower().endswith((".md", ".txt")):
-                event.acceptProposedAction()
-                return
-        event.ignore()
+        self._accept_drag(event)
+
+    def dragMoveEvent(self, event):
+        self._accept_drag(event)
 
     def dropEvent(self, event):
         urls = event.mimeData().urls()
