@@ -35,6 +35,8 @@ class Settings:
         "md_font_family": "",   # "" = use font_family
         "md_font_size": 0,      # 0  = use font_size
         "image_paste_folder": "assets",  # folder for pasted images (relative to the .md file)
+        "show_outline": True,
+        "outline_width": 180,
     }
 
     def __init__(self):
@@ -62,7 +64,7 @@ class Settings:
     _SESSION_KEYS = (
         "window_x", "window_y", "window_width", "window_height",
         "recent_files", "last_file", "open_dir", "word_wrap",
-        "font_size",
+        "font_size", "show_outline", "outline_width",
     )
 
     def save_geometry(self):

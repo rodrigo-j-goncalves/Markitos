@@ -1,6 +1,6 @@
-# Markitos Editor &nbsp; v1.0.9
+# Markitos Editor &nbsp; v1.1
 
-A lightweight desktop Markdown viewer and editor with **collapsible bullet lists**, LaTeX math rendering, and live appearance customization. Built with Python and PyQt6.
+A lightweight desktop Markdown viewer and editor with **collapsible sections**, an **outline sidebar**, LaTeX math rendering, and live appearance customization. Built with Python and PyQt6.
 
 
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue)
@@ -13,7 +13,8 @@ A lightweight desktop Markdown viewer and editor with **collapsible bullet lists
 - Pandoc/Quarto-flavoured Markdown — tables, strikethrough, footnotes, task lists, fenced code blocks
 - **LaTeX math** — inline `$...$` and display `$$...$$` rendered via KaTeX (requires internet; graceful fallback when offline)
 - View / Edit toggle — rendered Markdown preview or raw text editor, switch instantly; scroll position preserved when switching
-- Collapsible lists — any bullet or numbered item with children gets a ▶/▼ toggle; click to collapse/expand; toolbar buttons for collapse all / expand all
+- **Collapsible sections** — H2–H6 headings and bullet/numbered list items with children each get a ▶/▼ toggle; click to collapse/expand; toolbar buttons for collapse all / expand all
+- **Outline sidebar** — left panel showing the heading tree (H1→H2→H3…); click any heading to jump to it in either mode; clicking a heading inside a collapsed section automatically expands it; tracks cursor position in text editor and scroll position in Markdown view; toggle via View → Sidebar; width persisted across sessions
 - Ctrl+Scroll to zoom font size (6–72 pt)
 - Word wrap toggle
 - **Inline formatting shortcuts** — `Ctrl+B` bold, `Ctrl+I` italic on selected text (or inserts markers with cursor positioned inside)
@@ -77,10 +78,12 @@ python markitos.py myfile.md
 | `Ctrl+Y` | Redo |
 | `Ctrl+A` | Select all |
 | `↑` / `↓` | Move focus to previous/next element *(Markdown view only)* |
-| `→` | Expand focused collapsed list parent *(Markdown view only)* |
-| `←` | Collapse focused open list parent *(Markdown view only)* |
+| `→` | Expand focused collapsed item *(Markdown view only)* |
+| `←` | Collapse focused open item *(Markdown view only)* |
 
 Configurable shortcuts can be changed in **View → Settings → Keyboard Shortcuts**.
+
+> **Sidebar** has no default keyboard shortcut; toggle it from **View → Sidebar**.
 
 ---
 

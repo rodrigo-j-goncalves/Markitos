@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QWidget,
     QStackedWidget,
     QPlainTextEdit,
+    QSplitter,
     QVBoxLayout,
     QHBoxLayout,
     QToolBar,
@@ -41,6 +42,8 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QButtonGroup,
     QFrame,
+    QTreeWidget,
+    QTreeWidgetItem,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
@@ -83,7 +86,8 @@ class _Page(QWebEnginePage):
 # ---------------------------------------------------------------------------
 
 class _WebView(QWebEngineView):
-    ctrl_scroll = pyqtSignal(int)  # positive = up, negative = down
+    ctrl_scroll       = pyqtSignal(int)  # positive = up, negative = down
+    user_interaction  = pyqtSignal()     # any mouse click inside the page
 
     def childEvent(self, event):
         super().childEvent(event)
@@ -99,6 +103,8 @@ class _WebView(QWebEngineView):
             if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                 self.ctrl_scroll.emit(event.angleDelta().y())
                 return True
+        if event.type() == QEvent.Type.MouseButtonPress:
+            self.user_interaction.emit()
         return super().eventFilter(obj, event)
 
     def wheelEvent(self, event):
@@ -666,6 +672,174 @@ class _Editor(QPlainTextEdit):
 
 
 # ---------------------------------------------------------------------------
+# Shared heading helpers
+# ---------------------------------------------------------------------------
+
+def _heading_display_text(source_heading: str) -> str:
+    """Strip inline markdown from a heading so it matches the rendered textContent."""
+    t = source_heading
+    t = re.sub(r'\*\*(.+?)\*\*', r'\1', t)
+    t = re.sub(r'__(.+?)__',     r'\1', t)
+    t = re.sub(r'\*(.+?)\*',     r'\1', t)
+    t = re.sub(r'_(.+?)_',       r'\1', t)
+    t = re.sub(r'`(.+?)`',       r'\1', t)
+    t = re.sub(r'\[(.+?)\]\([^)]*\)', r'\1', t)
+    return t.strip()
+
+
+# ---------------------------------------------------------------------------
+# Outline (sidebar) panel
+# ---------------------------------------------------------------------------
+
+class _OutlinePanel(QWidget):
+    heading_clicked   = pyqtSignal(int, str)  # line_num, heading_text
+    heading_expanded  = pyqtSignal(str)        # heading_text
+    heading_collapsed = pyqtSignal(str)        # heading_text
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._header = QLabel("OUTLINE")
+        self._header.setContentsMargins(8, 6, 8, 6)
+        layout.addWidget(self._header)
+
+        self._tree = QTreeWidget()
+        self._tree.setHeaderHidden(True)
+        self._tree.setRootIsDecorated(True)
+        self._tree.setIndentation(12)
+        self._tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._tree.itemClicked.connect(self._on_item_clicked)
+        self._tree.itemExpanded.connect(lambda item: self.heading_expanded.emit(item.text(0)))
+        self._tree.itemCollapsed.connect(lambda item: self.heading_collapsed.emit(item.text(0)))
+        layout.addWidget(self._tree)
+
+        self.setMinimumWidth(80)
+
+    def _on_item_clicked(self, item, _col):
+        line_num = item.data(0, Qt.ItemDataRole.UserRole)
+        self.heading_clicked.emit(line_num, item.text(0))
+
+    def refresh(self, text: str):
+        self._tree.clear()
+        stack = []  # list of (level, QTreeWidgetItem)
+        for line_num, line in enumerate(text.split('\n')):
+            m = re.match(r'^(#{1,6})\s+(.*)', line)
+            if not m:
+                continue
+            level = len(m.group(1))
+            title = _heading_display_text(m.group(2))
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            if stack:
+                item = QTreeWidgetItem(stack[-1][1])
+            else:
+                item = QTreeWidgetItem(self._tree)
+            item.setText(0, title)
+            item.setToolTip(0, title)
+            item.setData(0, Qt.ItemDataRole.UserRole, line_num)
+            stack.append((level, item))
+        self._tree.collapseAll()
+
+    def set_current_heading(self, heading_text):
+        """Highlight the tree item matching heading_text (used in MD view)."""
+        if not heading_text:
+            return
+        best = None
+
+        def _walk(item):
+            nonlocal best
+            if best is not None:
+                return
+            if item.text(0) == heading_text:
+                best = item
+                return
+            for i in range(item.childCount()):
+                _walk(item.child(i))
+
+        root = self._tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            _walk(root.child(i))
+
+        if best is not None:
+            self._tree.blockSignals(True)
+            self._tree.setCurrentItem(best)
+            self._tree.blockSignals(False)
+            self._tree.scrollToItem(best)
+
+    def set_current_line(self, line_num: int):
+        best = None
+        best_line = -1
+
+        def _walk(item):
+            nonlocal best, best_line
+            n = item.data(0, Qt.ItemDataRole.UserRole)
+            if n is not None and n <= line_num and n > best_line:
+                best = item
+                best_line = n
+            for i in range(item.childCount()):
+                _walk(item.child(i))
+
+        root = self._tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            _walk(root.child(i))
+
+        self._tree.blockSignals(True)
+        self._tree.setCurrentItem(best)
+        self._tree.blockSignals(False)
+        if best:
+            self._tree.scrollToItem(best)
+
+    def expand_all(self):
+        self._tree.blockSignals(True)
+        self._tree.expandAll()
+        self._tree.blockSignals(False)
+
+    def collapse_all(self):
+        self._tree.blockSignals(True)
+        self._tree.collapseAll()
+        self._tree.blockSignals(False)
+
+    def apply_expand_state(self, state_map: dict):
+        """Update tree expand/collapse to match state_map {heading_text: is_open}."""
+        def _walk(item):
+            text = item.text(0)
+            if text in state_map:
+                item.setExpanded(state_map[text])
+            for i in range(item.childCount()):
+                _walk(item.child(i))
+        self._tree.blockSignals(True)
+        root = self._tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            _walk(root.child(i))
+        self._tree.blockSignals(False)
+
+    def apply_theme(self, bg_color: str, text_color: str, font_family: str, font_size: int):
+        tc = QColor(text_color)
+        self._header.setStyleSheet(
+            f"background: {bg_color};"
+            f"color: rgba({tc.red()},{tc.green()},{tc.blue()},150);"
+            "font-size: 10px; font-weight: bold; letter-spacing: 1px;"
+        )
+        self._tree.setStyleSheet(
+            f"QTreeWidget {{"
+            f"  background: {bg_color}; color: {text_color};"
+            f"  border: none; outline: none;"
+            f"}}"
+            f"QTreeWidget::item:selected {{"
+            f"  background: rgba({tc.red()},{tc.green()},{tc.blue()},40);"
+            f"  color: {text_color};"
+            f"}}"
+            f"QTreeWidget::item:hover:!selected {{"
+            f"  background: rgba({tc.red()},{tc.green()},{tc.blue()},20);"
+            f"}}"
+        )
+        self._tree.setFont(QFont(font_family, max(font_size - 2, 8)))
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 
@@ -682,6 +856,16 @@ class MainWindow(QMainWindow):
         self._setup_toolbar()
         self._setup_shortcuts()
         self._restore_geometry()
+
+        show_outline = self.settings.get("show_outline", True)
+        outline_w = self.settings.get("outline_width", 180)
+        self._sidebar_act.setChecked(show_outline)
+        if not show_outline:
+            self._outline_panel.hide()
+        else:
+            QTimer.singleShot(0, lambda: self._splitter.setSizes(
+                [outline_w, max(0, self.width() - outline_w)]
+            ))
 
         self.setAcceptDrops(True)
         self._update_title()
@@ -706,9 +890,24 @@ class MainWindow(QMainWindow):
     def _setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        vbox = QVBoxLayout(central)
+        hbox = QHBoxLayout(central)
+        hbox.setContentsMargins(0, 0, 0, 0)
+        hbox.setSpacing(0)
+
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.setHandleWidth(1)
+        hbox.addWidget(self._splitter)
+
+        self._outline_panel = _OutlinePanel()
+        self._splitter.addWidget(self._outline_panel)
+
+        _content = QWidget()
+        vbox = QVBoxLayout(_content)
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(0)
+        self._splitter.addWidget(_content)
+        self._splitter.setCollapsible(0, True)
+        self._splitter.setCollapsible(1, False)
 
         self._stack = QStackedWidget()
         vbox.addWidget(self._stack)
@@ -734,9 +933,30 @@ class MainWindow(QMainWindow):
         self._editor.textChanged.connect(self._mark_modified)
         self._editor.textChanged.connect(self._update_status_counts)
         self._editor.cursorPositionChanged.connect(self._update_status_counts)
+        self._editor.cursorPositionChanged.connect(self._update_outline_current)
         self._guides = _IndentGuides(self._editor)
         self._ws_fader = _WhitespaceFader(self._editor.document())
         self._stack.addWidget(self._editor)
+
+        self._outline_timer = QTimer(self)
+        self._outline_timer.setSingleShot(True)
+        self._outline_timer.setInterval(300)
+        self._outline_timer.timeout.connect(self._refresh_outline)
+        self._editor.textChanged.connect(self._outline_timer.start)
+        self._outline_panel.heading_clicked.connect(self._on_outline_heading_clicked)
+
+        self._outline_sync_timer = QTimer(self)
+        self._outline_sync_timer.setSingleShot(True)
+        self._outline_sync_timer.setInterval(200)
+        self._outline_sync_timer.timeout.connect(self._sync_outline_from_md_view)
+
+        self._outline_expand_timer = QTimer(self)
+        self._outline_expand_timer.setSingleShot(True)
+        self._outline_expand_timer.setInterval(150)
+        self._outline_expand_timer.timeout.connect(self._sync_outline_expand_state)
+        self._viewer.user_interaction.connect(self._on_md_user_interaction)
+        self._outline_panel.heading_expanded.connect(self._on_outline_heading_expanded)
+        self._outline_panel.heading_collapsed.connect(self._on_outline_heading_collapsed)
 
         self._find_bar = FindBar()
         self._find_bar.find_requested.connect(self._do_find)
@@ -807,6 +1027,14 @@ class MainWindow(QMainWindow):
 
         # View
         view_menu = mb.addMenu("&View")
+
+        self._sidebar_act = QAction("&Sidebar", self)
+        self._sidebar_act.setCheckable(True)
+        self._sidebar_act.setChecked(True)
+        self._sidebar_act.triggered.connect(self._toggle_sidebar)
+        view_menu.addAction(self._sidebar_act)
+
+        view_menu.addSeparator()
 
         self._toggle_act = QAction("Switch to &Text editor", self)
         self._toggle_act.setShortcut(QKeySequence("Ctrl+E"))
@@ -971,6 +1199,10 @@ class MainWindow(QMainWindow):
         self.settings["window_y"] = g.y()
         self.settings["window_width"] = g.width()
         self.settings["window_height"] = g.height()
+        sizes = self._splitter.sizes()
+        if self._outline_panel.isVisible() and sizes[0] > 0:
+            self.settings["outline_width"] = sizes[0]
+        self.settings["show_outline"] = self._outline_panel.isVisible()
 
     # ---------------------------------------------------------------- file ops
 
@@ -1026,6 +1258,7 @@ class MainWindow(QMainWindow):
         self._toggle_act.setText("Switch to &Text editor")
         self._lbl_mode.setText("Markdown view")
         self._render_view()
+        self._refresh_outline()
 
     def save_file(self):
         if not self.current_file:
@@ -1189,7 +1422,7 @@ class MainWindow(QMainWindow):
                 m = re.match(r'^#{1,6}\s+(.*)', block.text())
                 # Normalise the source heading the same way the browser renders it
                 # so "## **Bold** Title" matches the textContent "Bold Title".
-                if m and self._heading_display_text(m.group(1)) == heading_text:
+                if m and _heading_display_text(m.group(1)) == heading_text:
                     cursor = QTextCursor(block)
                     self._editor.setTextCursor(cursor)
                     QTimer.singleShot(0, self._editor.ensureCursorVisible)
@@ -1203,6 +1436,8 @@ class MainWindow(QMainWindow):
         cs = self._viewer.page().contentsSize()
         denom = max(1.0, cs.height() - self._viewer.height())
         self._view_scroll_ratio = min(1.0, max(0.0, pos.y() / denom))
+        if self.view_mode:
+            self._outline_sync_timer.start()
 
     def _restore_editor_scroll(self, ratio):
         """Position the editor at the block corresponding to the viewer's scroll ratio.
@@ -1231,18 +1466,6 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- heading helpers
 
-    @staticmethod
-    def _heading_display_text(source_heading: str) -> str:
-        """Strip inline markdown from a heading so it matches the rendered textContent."""
-        t = source_heading
-        t = re.sub(r'\*\*(.+?)\*\*', r'\1', t)   # bold **...**
-        t = re.sub(r'__(.+?)__',     r'\1', t)   # bold __...__
-        t = re.sub(r'\*(.+?)\*',     r'\1', t)   # italic *...*
-        t = re.sub(r'_(.+?)_',       r'\1', t)   # italic _..._
-        t = re.sub(r'`(.+?)`',       r'\1', t)   # inline code
-        t = re.sub(r'\[(.+?)\]\([^)]*\)', r'\1', t)  # link [text](url)
-        return t.strip()
-
     def _nearest_heading_above(self, block_num: int):
         """Return (display_text, block_number) of the nearest heading at or before
         block_num, or (None, None) if none exists."""
@@ -1250,7 +1473,7 @@ class MainWindow(QMainWindow):
         for i in range(block_num, -1, -1):
             m = re.match(r'^#{1,6}\s+(.*)', doc.findBlockByNumber(i).text())
             if m:
-                return self._heading_display_text(m.group(1)), i
+                return _heading_display_text(m.group(1)), i
         return None, None
 
     # ---------------------------------------------------------------- rendering
@@ -1268,7 +1491,7 @@ class MainWindow(QMainWindow):
             # between or after headings) ratio-based scroll is more accurate.
             current_text = self._editor.document().findBlockByNumber(block_num).text()
             m = re.match(r'^#{1,6}\s+(.*)', current_text)
-            self._pending_scroll_heading = self._heading_display_text(m.group(1)) if m else None
+            self._pending_scroll_heading = _heading_display_text(m.group(1)) if m else None
         html = render_markdown(self._editor.toPlainText(), self.settings)
         if self.current_file:
             base_url = QUrl.fromLocalFile(os.path.dirname(self.current_file) + os.sep)
@@ -1306,14 +1529,18 @@ class MainWindow(QMainWindow):
                 f'  window.__mdNavInitByScroll();'
                 f'}})()'
             )
+        # Sync outline after scroll settles (small delay so scrollIntoView has fired)
+        QTimer.singleShot(80, self._sync_outline_from_md_view)
 
     def collapse_all(self):
         if self.view_mode:
             self._viewer.page().runJavaScript("collapseAll()")
+        self._outline_panel.collapse_all()
 
     def expand_all(self):
         if self.view_mode:
             self._viewer.page().runJavaScript("expandAll()")
+        self._outline_panel.expand_all()
 
     # ----------------------------------------------------------- editor style
 
@@ -1375,6 +1602,14 @@ class MainWindow(QMainWindow):
         self._editor.set_line_number_colors(ln_fg, ln_bg)
 
         self._apply_word_wrap()
+        self._outline_panel.apply_theme(
+            self.settings["bg_color"], self.settings["text_color"],
+            self.settings["font_family"], self.settings["font_size"],
+        )
+        tc2 = QColor(self.settings["text_color"])
+        self._splitter.setStyleSheet(
+            f"QSplitter::handle {{ background: rgba({tc2.red()},{tc2.green()},{tc2.blue()},40); }}"
+        )
         self.modified = _was_modified
         self._update_title()   # re-sync title in case textChanged fired during styling
 
@@ -1454,6 +1689,129 @@ class MainWindow(QMainWindow):
         else:
             self.settings.restore(saved)
         self._on_appearance_live()
+
+    def _toggle_sidebar(self, checked: bool):
+        if checked:
+            self._outline_panel.show()
+            w = self.settings.get("outline_width", 180)
+            total = sum(self._splitter.sizes())
+            self._splitter.setSizes([w, max(0, total - w)])
+        else:
+            sizes = self._splitter.sizes()
+            if sizes[0] > 0:
+                self.settings["outline_width"] = sizes[0]
+            self._outline_panel.hide()
+        self.settings["show_outline"] = checked
+
+    def _on_md_user_interaction(self):
+        if self.view_mode:
+            self._outline_expand_timer.start()
+
+    def _sync_outline_expand_state(self):
+        """Query the open/closed state of every heading section in the MD page."""
+        if not self.view_mode:
+            return
+        self._viewer.page().runJavaScript(
+            "(function(){"
+            "  var result=[];"
+            "  var sums=document.querySelectorAll('summary.header-toggle');"
+            "  for(var i=0;i<sums.length;i++)"
+            "    result.push([sums[i].textContent.trim(),sums[i].parentElement.open]);"
+            "  return result;"
+            "})()",
+            self._apply_outline_expand_state,
+        )
+
+    def _apply_outline_expand_state(self, state):
+        if not state:
+            return
+        self._outline_panel.apply_expand_state({item[0]: item[1] for item in state})
+
+    def _on_outline_heading_expanded(self, heading_text: str):
+        if not self.view_mode:
+            return
+        safe = heading_text.replace('\\', '\\\\').replace('"', '\\"')
+        self._viewer.page().runJavaScript(
+            f'(function(){{'
+            f'  var sums=document.querySelectorAll("summary.header-toggle");'
+            f'  for(var i=0;i<sums.length;i++){{'
+            f'    if(sums[i].textContent.trim()==="{safe}"){{'
+            f'      sums[i].parentElement.setAttribute("open","");break;}}'
+            f'  }}'
+            f'}})()'
+        )
+
+    def _on_outline_heading_collapsed(self, heading_text: str):
+        if not self.view_mode:
+            return
+        safe = heading_text.replace('\\', '\\\\').replace('"', '\\"')
+        self._viewer.page().runJavaScript(
+            f'(function(){{'
+            f'  var sums=document.querySelectorAll("summary.header-toggle");'
+            f'  for(var i=0;i<sums.length;i++){{'
+            f'    if(sums[i].textContent.trim()==="{safe}"){{'
+            f'      sums[i].parentElement.removeAttribute("open");break;}}'
+            f'  }}'
+            f'}})()'
+        )
+
+    def _sync_outline_from_md_view(self):
+        """Query the MD page for the topmost visible heading and highlight it in the outline."""
+        if not self.view_mode:
+            return
+        self._viewer.page().runJavaScript(
+            "(function(){"
+            "var els=document.querySelectorAll('summary.header-toggle,h1');"
+            "var best=null,mid=window.scrollY+window.innerHeight/2;"
+            "for(var i=0;i<els.length;i++){"
+            # offsetParent===null means the element is inside a collapsed <details>
+            "  if(els[i].offsetParent===null)continue;"
+            "  var top=els[i].getBoundingClientRect().top+window.scrollY;"
+            "  if(top<=mid)best=els[i].textContent.trim();"
+            "  else break;"
+            "}"
+            "return best;"
+            "})()",
+            self._outline_panel.set_current_heading,
+        )
+
+    def _refresh_outline(self):
+        self._outline_panel.refresh(self._editor.toPlainText())
+        if not self.view_mode:
+            self._update_outline_current()
+
+    def _update_outline_current(self):
+        if self.view_mode:
+            return
+        self._outline_panel.set_current_line(self._editor.textCursor().blockNumber())
+
+    def _on_outline_heading_clicked(self, line_num: int, heading_text: str):
+        if self.view_mode:
+            safe = heading_text.replace('\\', '\\\\').replace('"', '\\"')
+            # Expand all ancestor <details> so the heading is visible,
+            # then navigate the MD nav system to it.
+            self._viewer.page().runJavaScript(
+                f'(function(){{'
+                f'  var sums=document.querySelectorAll("summary.header-toggle,h1");'
+                f'  for(var i=0;i<sums.length;i++){{'
+                f'    if(sums[i].textContent.trim()==="{safe}"){{'
+                f'      var node=sums[i].parentElement;'
+                f'      while(node&&node!==document.body){{'
+                f'        if(node.tagName==="DETAILS")node.setAttribute("open","");'
+                f'        node=node.parentElement;'
+                f'      }}'
+                f'      break;'
+                f'    }}'
+                f'  }}'
+                f'  window.__mdNavInit("{safe}");'
+                f'}})()'
+            )
+        else:
+            block = self._editor.document().findBlockByNumber(line_num)
+            cursor = QTextCursor(block)
+            self._editor.setTextCursor(cursor)
+            QTimer.singleShot(0, self._editor.ensureCursorVisible)
+            self._editor.setFocus()
 
     def _toggle_word_wrap(self, checked: bool):
         self.settings["word_wrap"] = checked

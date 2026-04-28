@@ -457,6 +457,31 @@ function expandAll() {
             }
         }
     });
+
+    // When the user clicks a nav item (e.g. a summary heading), sync navIndex
+    // so the next arrow key continues from that position instead of index 0.
+    document.addEventListener('click', function(e) {
+        var found = null;
+        var node = e.target;
+        while (node && node !== document.body) {
+            if (visibleNavItems().indexOf(node) >= 0) {
+                found = node;
+                break;
+            }
+            node = node.parentElement;
+        }
+        if (!found) return;
+        var captured = found;
+        // Use setTimeout so the DOM has settled after <details> open/close
+        setTimeout(function() {
+            var newItems = visibleNavItems();
+            var newIdx = newItems.indexOf(captured);
+            if (newIdx < 0) return;
+            clearFocus(newItems);
+            navIndex = newIdx;
+            applyFocus(newItems, navIndex);
+        }, 0);
+    });
 })();
 """
 
